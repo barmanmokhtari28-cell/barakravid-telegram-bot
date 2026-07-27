@@ -127,10 +127,10 @@ def format_telegram_caption(tweet_data: dict) -> str:
         caption += f"<blockquote expandable>{escape_html(original_text)}</blockquote>\n\n"
 
     # 3. Custom Source Link
-    caption += f"🔗 <a href='{tweet_url}'>لینک به زر این کون نشور</a>\n\n"
+    caption += f"🔗 <a href='{tweet_url}'>لیـنــک زر این کون‌نشـور</a>\n\n"
 
     # 4. Custom Footer & Hashtags
-    caption += f"🤖@secretollah\n#راوید\n#اکسیوس"
+    caption += f"🤖 @secretollah\n#راوید\n#اکسیوس"
 
     return caption
 
