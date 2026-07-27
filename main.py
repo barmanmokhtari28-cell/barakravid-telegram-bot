@@ -49,8 +49,44 @@ def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
         print(f"Translation error: {e}")
         return text, False
 
+def fetch_recent_tweet_ids(username: str) -> list:
+    """Fetches recent tweet IDs using Twitter Official Syndication + Fallback Nitter."""
+    tweet_ids = []
+    
+    # Method 1: Official Twitter Syndication Feed
+    syndication_url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        resp = requests.get(syndication_url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            found_ids = re.findall(r'/status/(\d+)', resp.text)
+            for tid in found_ids:
+                if tid not in tweet_ids:
+                    tweet_ids.append(tid)
+            print(f"Found {len(tweet_ids)} tweet IDs via Twitter Syndication.")
+    except Exception as e:
+        print(f"Syndication fetch error: {e}")
+
+    # Method 2: Fallback Nitter RSS
+    if not tweet_ids:
+        for rss_url in NITTER_INSTANCES:
+            try:
+                feed = feedparser.parse(rss_url)
+                if feed.entries:
+                    for entry in feed.entries:
+                        match = re.search(r'/status/(\d+)', entry.link)
+                        if match and match.group(1) not in tweet_ids:
+                            tweet_ids.append(match.group(1))
+                    if tweet_ids:
+                        print(f"Found {len(tweet_ids)} tweet IDs via Nitter RSS.")
+                        break
+            except Exception:
+                continue
+
+    return tweet_ids
+
 def fetch_tweet_details_fxtwitter(tweet_id: str):
-    """Fetches metadata & media via public FxTwitter API."""
+    """Fetches full tweet text, media, and language info via FxTwitter API."""
     url = f"https://api.fxtwitter.com/{TWITTER_TARGET_USER}/status/{tweet_id}"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -60,7 +96,7 @@ def fetch_tweet_details_fxtwitter(tweet_id: str):
             if data.get("code") == 200 and "tweet" in data:
                 return data["tweet"]
     except Exception as e:
-        print(f"Error fetching details for tweet ID {tweet_id}: {e}")
+        print(f"Error fetching tweet ID {tweet_id} from FxTwitter: {e}")
     return None
 
 def format_telegram_caption(tweet_data: dict) -> str:
@@ -87,28 +123,28 @@ def format_telegram_caption(tweet_data: dict) -> str:
     return caption
 
 def send_to_telegram(caption: str, media_urls: list):
-    """Sends message with photos/videos to Telegram channel."""
+    """Sends caption and media directly to Telegram channel and logs Telegram response."""
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
     
     photos = [m['url'] for m in media_urls if m['type'] == 'photo']
     videos = [m['url'] for m in media_urls if m['type'] == 'video']
 
     if not photos and not videos:
-        requests.post(api_url + "sendMessage", json={
+        res = requests.post(api_url + "sendMessage", json={
             "chat_id": TELEGRAM_CHANNEL,
             "text": caption,
             "parse_mode": "HTML",
             "disable_web_page_preview": False
         })
     elif len(photos) == 1 and not videos:
-        requests.post(api_url + "sendPhoto", json={
+        res = requests.post(api_url + "sendPhoto", json={
             "chat_id": TELEGRAM_CHANNEL,
             "photo": photos[0],
             "caption": caption,
             "parse_mode": "HTML"
         })
     elif len(videos) == 1 and not photos:
-        requests.post(api_url + "sendVideo", json={
+        res = requests.post(api_url + "sendVideo", json={
             "chat_id": TELEGRAM_CHANNEL,
             "video": videos[0],
             "caption": caption,
@@ -127,43 +163,28 @@ def send_to_telegram(caption: str, media_urls: list):
                 item["parse_mode"] = "HTML"
             media_group.append(item)
 
-        requests.post(api_url + "sendMediaGroup", json={
+        res = requests.post(api_url + "sendMediaGroup", json={
             "chat_id": TELEGRAM_CHANNEL,
             "media": media_group
         })
 
+    print(f"Telegram API Response Status ({res.status_code}): {res.text}")
+
 def run():
     last_tweet_id = load_last_tweet_id()
-    current_time = time.time()
-    seconds_in_24h = 24 * 3600
+    print(f"Checking @{TWITTER_TARGET_USER}... Last processed Tweet ID: {last_tweet_id}")
 
-    print(f"Checking @{TWITTER_TARGET_USER}... Last Tweet ID: {last_tweet_id}")
-
-    feed_entries = []
-    for rss_url in NITTER_INSTANCES:
-        try:
-            feed = feedparser.parse(rss_url)
-            if feed.entries:
-                feed_entries = feed.entries
-                break
-        except Exception:
-            continue
-
-    if not feed_entries:
-        print("No feed entries found.")
+    tweet_ids = fetch_recent_tweet_ids(TWITTER_TARGET_USER)
+    if not tweet_ids:
+        print("No tweet IDs found.")
         return
 
+    # Process oldest first
+    tweet_ids_to_process = list(reversed(tweet_ids[:10]))
     newest_tweet_id_seen = last_tweet_id
 
-    # Process entries from oldest to newest
-    for entry in reversed(feed_entries):
-        match = re.search(r'/status/(\d+)', entry.link)
-        if not match:
-            continue
-        
-        tweet_id = match.group(1)
-
-        # Skip tweets already processed in previous runs
+    for tweet_id in tweet_ids_to_process:
+        # Skip if already processed
         if last_tweet_id and int(tweet_id) <= int(last_tweet_id):
             continue
 
@@ -171,17 +192,10 @@ def run():
         if not tweet:
             continue
 
-        # Check if the tweet was posted within the last 24 hours
-        created_timestamp = tweet.get("created_timestamp")
-        if created_timestamp and (current_time - created_timestamp) > seconds_in_24h:
-            print(f"Skipping Tweet ID {tweet_id} (Older than 24 hours)")
-            continue
-
         text = tweet.get("text", "")
 
-        # Keyword filtering check
         if not KEYWORDS or any(kw in text.lower() for kw in KEYWORDS):
-            print(f"Match found! Tweet ID: {tweet_id}")
+            print(f"Match found! Processing Tweet ID: {tweet_id}")
 
             media_list = []
             media_data = tweet.get("media", {})
@@ -194,7 +208,6 @@ def run():
 
             caption = format_telegram_caption(tweet)
             send_to_telegram(caption, media_list)
-            print(f"Posted tweet {tweet_id} to Telegram!")
 
         newest_tweet_id_seen = tweet_id
 
