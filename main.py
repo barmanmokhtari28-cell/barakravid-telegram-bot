@@ -1,46 +1,33 @@
 import os
 import re
-import asyncio
-import threading
 import requests
 import feedparser
-from flask import Flask
-from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 
-# Load environment variables
-load_dotenv()
-
-# --- Web Server to Keep Bot Alive 24/7 ---
-app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return "Bot is running 24/7 (No Twitter Login Required)!", 200
-
-def run_flask_server():
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# Start web server in background thread
-threading.Thread(target=run_flask_server, daemon=True).start()
-
-# --- Configuration ---
+# --- Configuration (Loaded from GitHub Repository Secrets) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@secretollah")
 TWITTER_TARGET_USER = os.getenv("TWITTER_TARGET_USER", "barakravid")
 KEYWORDS_RAW = os.getenv("KEYWORDS", "")
 KEYWORDS = [k.strip().lower() for k in KEYWORDS_RAW.split(",") if k.strip()]
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "180"))
 
-# Public RSS feed endpoints (No login needed)
 NITTER_INSTANCES = [
     f"https://nitter.poast.org/{TWITTER_TARGET_USER}/rss",
     f"https://nitter.privacydev.net/{TWITTER_TARGET_USER}/rss",
     f"https://xcancel.com/{TWITTER_TARGET_USER}/rss"
 ]
 
-seen_tweet_ids = set()
+STATE_FILE = "last_tweet_id.txt"
+
+def load_last_tweet_id():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return f.read().strip()
+    return None
+
+def save_last_tweet_id(tweet_id):
+    with open(STATE_FILE, "w") as f:
+        f.write(str(tweet_id))
 
 def escape_html(text: str) -> str:
     """Escapes HTML special characters for Telegram API."""
@@ -62,10 +49,7 @@ def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
         return text, False
 
 def fetch_tweet_details_fxtwitter(tweet_id: str):
-    """
-    Fetches rich tweet metadata and media (HD videos/photos) 
-    via public FxTwitter API without requiring login credentials.
-    """
+    """Fetches metadata & media via public FxTwitter API."""
     url = f"https://api.fxtwitter.com/{TWITTER_TARGET_USER}/status/{tweet_id}"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -75,11 +59,11 @@ def fetch_tweet_details_fxtwitter(tweet_id: str):
             if data.get("code") == 200 and "tweet" in data:
                 return data["tweet"]
     except Exception as e:
-        print(f"Error fetching tweet details for ID {tweet_id}: {e}")
+        print(f"Error fetching details for tweet ID {tweet_id}: {e}")
     return None
 
 def format_telegram_caption(tweet_data: dict) -> str:
-    """Formats caption using Telegram HTML Expandable Blockquote."""
+    """Formats caption using HTML Expandable Blockquote."""
     original_text = tweet_data.get("text", "")
     author_name = tweet_data.get("author", {}).get("name", TWITTER_TARGET_USER)
     author_handle = tweet_data.get("author", {}).get("screen_name", TWITTER_TARGET_USER)
@@ -102,7 +86,7 @@ def format_telegram_caption(tweet_data: dict) -> str:
     return caption
 
 def send_to_telegram(caption: str, media_urls: list):
-    """Sends caption and media directly to Telegram channel."""
+    """Sends message with photos/videos to Telegram channel."""
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
     
     photos = [m['url'] for m in media_urls if m['type'] == 'photo']
@@ -147,66 +131,63 @@ def send_to_telegram(caption: str, media_urls: list):
             "media": media_group
         })
 
-async def monitor_twitter():
-    print(f"Monitoring @{TWITTER_TARGET_USER} via Public Feed...")
+def run():
+    last_tweet_id = load_last_tweet_id()
+    print(f"Checking @{TWITTER_TARGET_USER}... Last Tweet ID: {last_tweet_id}")
 
-    while True:
+    feed_entries = []
+    for rss_url in NITTER_INSTANCES:
         try:
-            print(f"Checking @{TWITTER_TARGET_USER} for new posts...")
-            feed_entries = []
+            feed = feedparser.parse(rss_url)
+            if feed.entries:
+                feed_entries = feed.entries
+                break
+        except Exception:
+            continue
 
-            # Try parsing from public RSS instances
-            for rss_url in NITTER_INSTANCES:
-                try:
-                    feed = feedparser.parse(rss_url)
-                    if feed.entries:
-                        feed_entries = feed.entries
-                        break
-                except Exception:
-                    continue
+    if not feed_entries:
+        print("No feed entries found.")
+        return
 
-            for entry in reversed(feed_entries):
-                match = re.search(r'/status/(\d+)', entry.link)
-                if not match:
-                    continue
-                
-                tweet_id = match.group(1)
-                if tweet_id in seen_tweet_ids:
-                    continue
+    newest_tweet_id_seen = last_tweet_id
 
-                seen_tweet_ids.add(tweet_id)
+    for entry in reversed(feed_entries):
+        match = re.search(r'/status/(\d+)', entry.link)
+        if not match:
+            continue
+        
+        tweet_id = match.group(1)
 
-                # Fetch full tweet metadata from public FxTwitter API
-                tweet = fetch_tweet_details_fxtwitter(tweet_id)
-                if not tweet:
-                    continue
+        # Skip tweets already processed
+        if last_tweet_id and int(tweet_id) <= int(last_tweet_id):
+            continue
 
-                text = tweet.get("text", "")
+        tweet = fetch_tweet_details_fxtwitter(tweet_id)
+        if not tweet:
+            continue
 
-                # Keyword check (Matches all if KEYWORDS is empty)
-                if not KEYWORDS or any(kw in text.lower() for kw in KEYWORDS):
-                    print(f"Match found! Tweet ID: {tweet_id}")
+        text = tweet.get("text", "")
 
-                    # Extract photos and videos
-                    media_list = []
-                    media_data = tweet.get("media", {})
-                    
-                    if "photos" in media_data and media_data["photos"]:
-                        for photo in media_data["photos"]:
-                            media_list.append({"type": "photo", "url": photo["url"]})
-                            
-                    if "videos" in media_data and media_data["videos"]:
-                        for video in media_data["videos"]:
-                            media_list.append({"type": "video", "url": video["url"]})
+        if not KEYWORDS or any(kw in text.lower() for kw in KEYWORDS):
+            print(f"Match found! Tweet ID: {tweet_id}")
 
-                    caption = format_telegram_caption(tweet)
-                    send_to_telegram(caption, media_list)
-                    print(f"Successfully posted tweet {tweet_id} to Telegram!")
+            media_list = []
+            media_data = tweet.get("media", {})
+            if "photos" in media_data and media_data["photos"]:
+                for photo in media_data["photos"]:
+                    media_list.append({"type": "photo", "url": photo["url"]})
+            if "videos" in media_data and media_data["videos"]:
+                for video in media_data["videos"]:
+                    media_list.append({"type": "video", "url": video["url"]})
 
-        except Exception as e:
-            print(f"Error checking posts: {e}")
+            caption = format_telegram_caption(tweet)
+            send_to_telegram(caption, media_list)
+            print(f"Posted tweet {tweet_id} to Telegram!")
 
-        await asyncio.sleep(CHECK_INTERVAL)
+        newest_tweet_id_seen = tweet_id
+
+    if newest_tweet_id_seen and newest_tweet_id_seen != last_tweet_id:
+        save_last_tweet_id(newest_tweet_id_seen)
 
 if __name__ == "__main__":
-    asyncio.run(monitor_twitter())
+    run()
