@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 import feedparser
 from deep_translator import GoogleTranslator
@@ -133,6 +134,9 @@ def send_to_telegram(caption: str, media_urls: list):
 
 def run():
     last_tweet_id = load_last_tweet_id()
+    current_time = time.time()
+    seconds_in_24h = 24 * 3600
+
     print(f"Checking @{TWITTER_TARGET_USER}... Last Tweet ID: {last_tweet_id}")
 
     feed_entries = []
@@ -151,6 +155,7 @@ def run():
 
     newest_tweet_id_seen = last_tweet_id
 
+    # Process entries from oldest to newest
     for entry in reversed(feed_entries):
         match = re.search(r'/status/(\d+)', entry.link)
         if not match:
@@ -158,7 +163,7 @@ def run():
         
         tweet_id = match.group(1)
 
-        # Skip tweets already processed
+        # Skip tweets already processed in previous runs
         if last_tweet_id and int(tweet_id) <= int(last_tweet_id):
             continue
 
@@ -166,8 +171,15 @@ def run():
         if not tweet:
             continue
 
+        # Check if the tweet was posted within the last 24 hours
+        created_timestamp = tweet.get("created_timestamp")
+        if created_timestamp and (current_time - created_timestamp) > seconds_in_24h:
+            print(f"Skipping Tweet ID {tweet_id} (Older than 24 hours)")
+            continue
+
         text = tweet.get("text", "")
 
+        # Keyword filtering check
         if not KEYWORDS or any(kw in text.lower() for kw in KEYWORDS):
             print(f"Match found! Tweet ID: {tweet_id}")
 
