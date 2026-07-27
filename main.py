@@ -46,81 +46,98 @@ def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
         return text, False
 
 def fetch_tweet_details_fxtwitter(tweet_id: str):
-    """Fetches full tweet text, media, and language info via FxTwitter API."""
-    url = f"https://api.fxtwitter.com/{TWITTER_TARGET_USER}/status/{tweet_id}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if "tweet" in data:
-                return data["tweet"]
-    except Exception as e:
-        print(f"FxTwitter API error for ID {tweet_id}: {e}")
+    """Fetches full tweet metadata and media via FxTwitter / VxTwitter API."""
+    for domain in ["api.fxtwitter.com", "api.vxtwitter.com"]:
+        url = f"https://{domain}/{TWITTER_TARGET_USER}/status/{tweet_id}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if "tweet" in data:
+                    return data["tweet"]
+        except Exception as e:
+            print(f"FxTwitter API error for ID {tweet_id} on {domain}: {e}")
     return None
 
 def fetch_recent_tweet_ids():
-    """Fetches recent Tweet IDs directly from Twitter Syndication timeline."""
+    """Fetches recent Tweet IDs using direct endpoints, CORS proxies, and RSS fallbacks."""
     tweet_ids = []
     
-    # Method 1: Twitter Official Syndication Page (__NEXT_DATA__ JSON)
-    url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
+    target_syndication_url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}"
     
+    # 1. Direct Twitter Syndication
     try:
-        print(f"📡 Fetching tweets from Twitter Syndication ({url})...")
-        resp = requests.get(url, headers=headers, timeout=12)
-        print(f"Syndication HTTP Status: {resp.status_code}")
+        print(f"📡 Method 1: Direct Twitter Syndication ({target_syndication_url})...")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        resp = requests.get(target_syndication_url, headers=headers, timeout=10)
+        print(f"Direct Syndication HTTP Status: {resp.status_code}")
         
         if resp.status_code == 200:
-            # Extract JSON from __NEXT_DATA__ script
-            if '<script id="__NEXT_DATA__"' in resp.text:
-                try:
-                    raw_json = resp.text.split('<script id="__NEXT_DATA__" type="application/json">')[1].split('</script>')[0]
-                    data = json.loads(raw_json)
-                    entries = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
-                    for entry in entries:
-                        if entry.get("type") == "tweet":
-                            tid = entry.get("entry_id") or entry.get("content", {}).get("tweet", {}).get("id_str")
-                            if tid:
-                                tid_str = str(tid).replace("tweet-", "")
-                                if tid_str not in tweet_ids:
-                                    tweet_ids.append(tid_str)
-                except Exception as je:
-                    print(f"JSON parsing notice: {je}")
-
-            # Fallback regex extraction
             found = re.findall(r'/status/(\d+)', resp.text)
             for tid in found:
                 if tid not in tweet_ids:
                     tweet_ids.append(tid)
-
+            if tweet_ids:
+                print(f"✅ Success via Direct Syndication! Found {len(tweet_ids)} IDs.")
+                return tweet_ids
     except Exception as e:
-        print(f"Syndication request error: {e}")
+        print(f"Direct Syndication error: {e}")
 
-    # Method 2: Nitter RSS Fallback
-    if not tweet_ids:
-        rss_urls = [
-            f"https://rsshub.app/twitter/user/{TWITTER_TARGET_USER}",
-            f"https://nitter.poast.org/{TWITTER_TARGET_USER}/rss",
-            f"https://xcancel.com/{TWITTER_TARGET_USER}/rss"
-        ]
-        for rss_url in rss_urls:
-            try:
-                print(f"📡 Trying RSS fallback: {rss_url}...")
-                feed = feedparser.parse(rss_url)
-                if feed.entries:
-                    for entry in feed.entries:
-                        match = re.search(r'/status/(\d+)', entry.link)
-                        if match and match.group(1) not in tweet_ids:
-                            tweet_ids.append(match.group(1))
-                    if tweet_ids:
-                        break
-            except Exception as e:
-                print(f"RSS notice: {e}")
+    # 2. CORS Proxy Fallbacks (Bypasses GitHub Actions 429 Rate-Limits)
+    proxy_urls = [
+        f"https://api.allorigins.win/get?url={target_syndication_url}",
+        f"https://corsproxy.io/?{target_syndication_url}"
+    ]
+    for p_url in proxy_urls:
+        try:
+            print(f"📡 Method 2: Trying Proxy ({p_url[:45]}...)...")
+            resp = requests.get(p_url, timeout=12)
+            if resp.status_code == 200:
+                content = ""
+                if "allorigins.win" in p_url:
+                    content = resp.json().get("contents", "")
+                else:
+                    content = resp.text
+
+                found = re.findall(r'/status/(\d+)', content)
+                for tid in found:
+                    if tid not in tweet_ids:
+                        tweet_ids.append(tid)
+                
+                if tweet_ids:
+                    print(f"✅ Success via Proxy! Found {len(tweet_ids)} IDs.")
+                    return tweet_ids
+        except Exception as e:
+            print(f"Proxy fetch error: {e}")
+
+    # 3. RSS Feed Fallbacks (Nitter & RSSHub & RSS-Bridge)
+    rss_sources = [
+        f"https://rsshub.rssforever.com/twitter/user/{TWITTER_TARGET_USER}",
+        f"https://rsshub.app/twitter/user/{TWITTER_TARGET_USER}",
+        f"https://rss-bridge.org/bridge01/?action=display&bridge=TwitterBridge&context=By+username&u={TWITTER_TARGET_USER}&format=Atom",
+        f"https://nitter.poast.org/{TWITTER_TARGET_USER}/rss",
+        f"https://xcancel.com/{TWITTER_TARGET_USER}/rss",
+        f"https://nitter.privacydev.net/{TWITTER_TARGET_USER}/rss",
+        f"https://nitter.cz/{TWITTER_TARGET_USER}/rss"
+    ]
+    for rss_url in rss_sources:
+        try:
+            print(f"📡 Method 3: Trying RSS Source ({rss_url[:50]}...)...")
+            feed = feedparser.parse(rss_url)
+            if feed.entries:
+                for entry in feed.entries:
+                    match = re.search(r'/status/(\d+)', entry.link)
+                    if match and match.group(1) not in tweet_ids:
+                        tweet_ids.append(match.group(1))
+                if tweet_ids:
+                    print(f"✅ Success via RSS! Found {len(tweet_ids)} IDs.")
+                    return tweet_ids
+        except Exception as e:
+            print(f"RSS notice: {e}")
 
     return tweet_ids
 
@@ -218,7 +235,7 @@ def run():
 
     tweet_ids = fetch_recent_tweet_ids()
     if not tweet_ids:
-        print("❌ ERROR: Could not retrieve any tweet IDs!")
+        print("❌ ERROR: Could not retrieve any tweet IDs from any source!")
         return
 
     print(f"Found {len(tweet_ids)} tweet IDs: {tweet_ids[:5]}...")
