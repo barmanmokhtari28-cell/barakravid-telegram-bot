@@ -29,14 +29,14 @@ def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
-    """Translates non-English text to English."""
-    if tweet_lang and tweet_lang.lower() == 'en':
+    """Translates non-Persian text into Persian (Farsi)."""
+    if tweet_lang and tweet_lang.lower() == 'fa':
         return text, False
 
     try:
-        translator = GoogleTranslator(source='auto', target='en')
+        translator = GoogleTranslator(source='auto', target='fa')
         translated = translator.translate(text)
-        if translated and translated.strip().lower() != text.strip().lower():
+        if translated and translated.strip() != text.strip():
             return translated, True
         return text, False
     except Exception as e:
@@ -105,7 +105,7 @@ def fetch_recent_tweet_ids():
     return tweet_ids
 
 def format_telegram_caption(tweet_data: dict) -> str:
-    """Formats caption using HTML Expandable Blockquote."""
+    """Formats caption using modern Telegram Rich Text HTML tags."""
     original_text = tweet_data.get("text", "")
     author_name = tweet_data.get("author", {}).get("name", TWITTER_TARGET_USER)
     author_handle = tweet_data.get("author", {}).get("screen_name", TWITTER_TARGET_USER)
@@ -115,16 +115,23 @@ def format_telegram_caption(tweet_data: dict) -> str:
 
     translated_text, was_translated = translate_if_needed(original_text, tweet_lang)
 
+    # 1. Author Header
     caption = f"👤 <b><a href='{tweet_url}'>{escape_html(author_name)} (@{escape_html(author_handle)})</a></b>\n\n"
     
+    # 2. Body Text (Expandable Blockquote)
     if was_translated:
-        caption += f"🌐 <i>[Translated to English]</i>\n"
+        caption += f"🌐 <b>ترجمه ماشینی به فارسی:</b>\n"
         caption += f"<blockquote expandable>{escape_html(translated_text)}\n\n"
-        caption += f"<b>Original ({tweet_lang or 'Hebrew'}):</b>\n{escape_html(original_text)}</blockquote>\n\n"
+        caption += f"<b>متن اصلی:</b>\n{escape_html(original_text)}</blockquote>\n\n"
     else:
         caption += f"<blockquote expandable>{escape_html(original_text)}</blockquote>\n\n"
 
-    caption += f"🔗 <a href='{tweet_url}'>View on X</a>"
+    # 3. Custom Source Link
+    caption += f"🔗 <a href='{tweet_url}'>لینک به زر این کون نشور</a>\n\n"
+
+    # 4. Custom Footer & Hashtags
+    caption += f"🤖@secretollah\n#راوید\n#اکسیوس"
+
     return caption
 
 def send_to_telegram(caption: str, media_urls: list):
