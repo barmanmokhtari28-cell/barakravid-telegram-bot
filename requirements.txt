@@ -1,0 +1,6 @@
+requests
+python-dotenv
+deep-translator
+flask
+gunicorn
+feedparser
