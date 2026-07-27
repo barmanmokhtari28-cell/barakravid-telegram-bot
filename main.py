@@ -1,11 +1,11 @@
 import os
 import re
-import time
+import json
 import requests
 import feedparser
 from deep_translator import GoogleTranslator
 
-# --- Configuration (Loaded from GitHub Repository Secrets) ---
+# --- Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@secretollah")
 TWITTER_TARGET_USER = os.getenv("TWITTER_TARGET_USER", "barakravid")
@@ -24,7 +24,7 @@ def load_last_tweet_id():
 def save_last_tweet_id(tweet_id):
     with open(STATE_FILE, "w") as f:
         f.write(str(tweet_id))
-    print(f"Saved state file '{STATE_FILE}' with Tweet ID: {tweet_id}")
+    print(f"💾 Updated state file '{STATE_FILE}' with Tweet ID: {tweet_id}")
 
 def escape_html(text: str) -> str:
     """Escapes HTML special characters for Telegram API."""
@@ -42,97 +42,87 @@ def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
             return translated, True
         return text, False
     except Exception as e:
-        print(f"Translation error: {e}")
+        print(f"Translation notice: {e}")
         return text, False
 
 def fetch_tweet_details_fxtwitter(tweet_id: str):
-    """Fetches full tweet metadata and media via FxTwitter/VxTwitter API."""
-    for domain in ["api.fxtwitter.com", "api.vxtwitter.com"]:
-        url = f"https://{domain}/{TWITTER_TARGET_USER}/status/{tweet_id}"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if "tweet" in data:
-                    return data["tweet"]
-                elif "text" in data:
-                    return data
-        except Exception as e:
-            print(f"Error fetching tweet ID {tweet_id} from {domain}: {e}")
+    """Fetches full tweet text, media, and language info via FxTwitter API."""
+    url = f"https://api.fxtwitter.com/{TWITTER_TARGET_USER}/status/{tweet_id}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if "tweet" in data:
+                return data["tweet"]
+    except Exception as e:
+        print(f"FxTwitter API error for ID {tweet_id}: {e}")
     return None
 
-def fetch_recent_tweets():
-    """Fetches recent tweet objects using multiple reliable sources."""
-    tweets = []
+def fetch_recent_tweet_ids():
+    """Fetches recent Tweet IDs directly from Twitter Syndication timeline."""
+    tweet_ids = []
     
-    # Source 1: FxTwitter / VxTwitter Profile APIs
-    for domain in ["api.fxtwitter.com", "api.vxtwitter.com"]:
-        try:
-            print(f"Fetching timeline from https://{domain}/{TWITTER_TARGET_USER}...")
-            url = f"https://{domain}/{TWITTER_TARGET_USER}"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                fetched = []
-                if "tweets" in data and isinstance(data["tweets"], list):
-                    fetched = data["tweets"]
-                elif "user" in data and "tweets" in data["user"]:
-                    fetched = data["user"]["tweets"]
-                
-                if fetched:
-                    print(f"Successfully retrieved {len(fetched)} tweets from {domain}!")
-                    return fetched
-        except Exception as e:
-            print(f"Source {domain} error: {e}")
-
-    # Source 2: Twitter Syndication Feed
+    # Method 1: Twitter Official Syndication Page (__NEXT_DATA__ JSON)
+    url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    
     try:
-        print("Fetching timeline from Twitter Syndication...")
-        syndication_url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        }
-        resp = requests.get(syndication_url, headers=headers, timeout=10)
+        print(f"📡 Fetching tweets from Twitter Syndication ({url})...")
+        resp = requests.get(url, headers=headers, timeout=12)
+        print(f"Syndication HTTP Status: {resp.status_code}")
+        
         if resp.status_code == 200:
-            found_ids = re.findall(r'/status/(\d+)', resp.text)
-            found_ids = list(dict.fromkeys(found_ids))
-            print(f"Found {len(found_ids)} Tweet IDs via Syndication.")
-            for tid in found_ids[:10]:
-                td = fetch_tweet_details_fxtwitter(tid)
-                if td:
-                    tweets.append(td)
-            if tweets:
-                return tweets
+            # Extract JSON from __NEXT_DATA__ script
+            if '<script id="__NEXT_DATA__"' in resp.text:
+                try:
+                    raw_json = resp.text.split('<script id="__NEXT_DATA__" type="application/json">')[1].split('</script>')[0]
+                    data = json.loads(raw_json)
+                    entries = data.get("props", {}).get("pageProps", {}).get("timeline", {}).get("entries", [])
+                    for entry in entries:
+                        if entry.get("type") == "tweet":
+                            tid = entry.get("entry_id") or entry.get("content", {}).get("tweet", {}).get("id_str")
+                            if tid:
+                                tid_str = str(tid).replace("tweet-", "")
+                                if tid_str not in tweet_ids:
+                                    tweet_ids.append(tid_str)
+                except Exception as je:
+                    print(f"JSON parsing notice: {je}")
+
+            # Fallback regex extraction
+            found = re.findall(r'/status/(\d+)', resp.text)
+            for tid in found:
+                if tid not in tweet_ids:
+                    tweet_ids.append(tid)
+
     except Exception as e:
-        print(f"Syndication error: {e}")
+        print(f"Syndication request error: {e}")
 
-    # Source 3: Public RSS Feed Fallbacks
-    rss_sources = [
-        f"https://rsshub.app/twitter/user/{TWITTER_TARGET_USER}",
-        f"https://nitter.poast.org/{TWITTER_TARGET_USER}/rss",
-        f"https://xcancel.com/{TWITTER_TARGET_USER}/rss"
-    ]
-    for rss_url in rss_sources:
-        try:
-            print(f"Trying RSS feed: {rss_url}")
-            feed = feedparser.parse(rss_url)
-            if feed.entries:
-                print(f"Found {len(feed.entries)} entries in RSS feed!")
-                for entry in feed.entries[:10]:
-                    match = re.search(r'/status/(\d+)', entry.link)
-                    if match:
-                        tid = match.group(1)
-                        td = fetch_tweet_details_fxtwitter(tid)
-                        if td:
-                            tweets.append(td)
-                if tweets:
-                    return tweets
-        except Exception as e:
-            print(f"RSS error on {rss_url}: {e}")
+    # Method 2: Nitter RSS Fallback
+    if not tweet_ids:
+        rss_urls = [
+            f"https://rsshub.app/twitter/user/{TWITTER_TARGET_USER}",
+            f"https://nitter.poast.org/{TWITTER_TARGET_USER}/rss",
+            f"https://xcancel.com/{TWITTER_TARGET_USER}/rss"
+        ]
+        for rss_url in rss_urls:
+            try:
+                print(f"📡 Trying RSS fallback: {rss_url}...")
+                feed = feedparser.parse(rss_url)
+                if feed.entries:
+                    for entry in feed.entries:
+                        match = re.search(r'/status/(\d+)', entry.link)
+                        if match and match.group(1) not in tweet_ids:
+                            tweet_ids.append(match.group(1))
+                    if tweet_ids:
+                        break
+            except Exception as e:
+                print(f"RSS notice: {e}")
 
-    return tweets
+    return tweet_ids
 
 def format_telegram_caption(tweet_data: dict) -> str:
     """Formats caption using HTML Expandable Blockquote."""
@@ -203,41 +193,56 @@ def send_to_telegram(caption: str, media_urls: list):
             "media": media_group
         })
 
-    print(f"Telegram API Response Status ({res.status_code}): {res.text}")
+    if res.status_code == 200:
+        print(f"✅ SUCCESS: Posted to Telegram channel {TELEGRAM_CHANNEL}!")
+    else:
+        print(f"❌ TELEGRAM ERROR ({res.status_code}): {res.text}")
 
 def run():
+    print("=" * 50)
     print(f"=== Starting Twitter Monitor for @{TWITTER_TARGET_USER} ===")
-    print(f"Configured Channel: {TELEGRAM_CHANNEL}")
-    print(f"Configured Keywords: {KEYWORDS if KEYWORDS else 'None (All tweets match)'}")
+    print("=" * 50)
     
-    last_tweet_id = load_last_tweet_id()
-    print(f"Last processed Tweet ID from state: {last_tweet_id}")
-
-    tweets = fetch_recent_tweets()
-    if not tweets:
-        print("ERROR: Could not fetch any tweets from any source!")
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ CRITICAL ERROR: TELEGRAM_BOT_TOKEN secret is empty or missing in GitHub Repository Secrets!")
+        return
+    if not TELEGRAM_CHANNEL:
+        print("❌ CRITICAL ERROR: TELEGRAM_CHANNEL environment variable is missing!")
         return
 
-    print(f"Fetched {len(tweets)} tweets. Processing...")
+    print(f"Target Channel: {TELEGRAM_CHANNEL}")
+    print(f"Keywords Filter: {KEYWORDS if KEYWORDS else 'None (Matching ALL posts)'}")
+    
+    last_tweet_id = load_last_tweet_id()
+    print(f"Last processed Tweet ID: {last_tweet_id}")
 
-    # Sort tweets from oldest to newest
-    tweets_sorted = sorted(tweets, key=lambda x: int(x.get("id", 0)))
+    tweet_ids = fetch_recent_tweet_ids()
+    if not tweet_ids:
+        print("❌ ERROR: Could not retrieve any tweet IDs!")
+        return
+
+    print(f"Found {len(tweet_ids)} tweet IDs: {tweet_ids[:5]}...")
+
+    # Process oldest first
+    tweet_ids_to_process = list(reversed(tweet_ids[:10]))
     newest_tweet_id_seen = last_tweet_id
 
-    for tweet in tweets_sorted:
-        tweet_id = str(tweet.get("id"))
-        
-        # Skip tweets already processed
+    for tweet_id in tweet_ids_to_process:
+        # Skip if already processed in earlier run
         if last_tweet_id and int(tweet_id) <= int(last_tweet_id):
-            print(f"Skipping Tweet ID {tweet_id} (already processed in earlier run).")
+            print(f"Skipping Tweet ID {tweet_id} (already posted previously).")
+            continue
+
+        tweet = fetch_tweet_details_fxtwitter(tweet_id)
+        if not tweet:
+            print(f"Could not load details for Tweet ID {tweet_id}, skipping.")
             continue
 
         text = tweet.get("text", "")
-        print(f"Evaluating Tweet ID {tweet_id}: '{text[:60]}...'")
+        print(f"\nProcessing Tweet ID {tweet_id}: '{text[:60]}...'")
 
-        # Check keyword filter
         if not KEYWORDS or any(kw in text.lower() for kw in KEYWORDS):
-            print(f"-> MATCH FOUND for Tweet ID {tweet_id}!")
+            print(f"-> MATCH FOUND! Sending Tweet ID {tweet_id} to Telegram...")
 
             media_list = []
             media_data = tweet.get("media", {})
