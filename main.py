@@ -41,6 +41,29 @@ def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
         print(f"Translation notice: {e}")
         return text, False
 
+def extract_tweet_ids(text: str) -> list[str]:
+    """Pulls tweet IDs out of an HTML or JSON response body.
+
+    Handles three shapes we've seen in practice:
+    - plain HTML links: /status/1234567890
+    - JSON with escaped slashes: status\\/1234567890 (common with older/internal
+      Twitter backends, which escape "/" as "\\/" inside JSON strings)
+    - JSON fields with the ID as a plain value: "id_str":"1234567890"
+    A single regex tuned for HTML silently finds nothing against a JSON body,
+    which looks identical to "no tweets" — this checks all three so a 200
+    response isn't wasted just because of how the ID happened to be encoded.
+    """
+    ids = []
+    patterns = [
+        r'status\\?/(\d+)',
+        r'"id_str"\s*:\s*"(\d+)"',
+    ]
+    for pattern in patterns:
+        for tid in re.findall(pattern, text):
+            if tid not in ids:
+                ids.append(tid)
+    return ids
+
 def fetch_tweet_details_fxtwitter(tweet_id: str):
     """Fetches full tweet metadata and media via FxTwitter API."""
     for domain in ["api.fxtwitter.com", "api.vxtwitter.com"]:
@@ -75,7 +98,7 @@ def fetch_recent_tweet_ids():
         resp = requests.get(jina_url, headers=headers, timeout=25)
         print(f"Jina AI Status: {resp.status_code}")
         if resp.status_code == 200:
-            found = re.findall(r'status/(\d+)', resp.text)
+            found = extract_tweet_ids(resp.text)
             for tid in found:
                 if tid not in tweet_ids:
                     tweet_ids.append(tid)
@@ -115,7 +138,7 @@ def fetch_recent_tweet_ids():
             print(f"📡 Method 2: Trying syndication endpoint ({s_url[:60]}...)...")
             resp = requests.get(s_url, headers=widget_headers, timeout=12)
             if resp.status_code == 200:
-                found = re.findall(r'status/(\d+)', resp.text)
+                found = extract_tweet_ids(resp.text)
                 for tid in found:
                     if tid not in tweet_ids:
                         tweet_ids.append(tid)
@@ -124,6 +147,7 @@ def fetch_recent_tweet_ids():
                     return tweet_ids
                 else:
                     print("Syndication endpoint returned 200 but no tweet IDs were found in the content.")
+                    print(f"Raw response snippet for debugging: {resp.text[:300]!r}")
             else:
                 print(f"Syndication notice: got HTTP {resp.status_code}")
         except Exception as e:
