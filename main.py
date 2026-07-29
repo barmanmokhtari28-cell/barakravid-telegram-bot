@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import requests
 from deep_translator import GoogleTranslator
 
@@ -62,41 +61,31 @@ def fetch_recent_tweet_ids():
     tweet_ids = []
     
     # Method 1: Jina AI Web Reader (Renders X.com using headless browser proxies)
-    # NOTE: r.jina.ai's default cache lifetime is 3600s, which was the main source
-    # of the original "posts arrive late" delay. But a hard "x-no-cache: true"
-    # forces a brand-new live scrape of x.com on EVERY run, and X's anti-bot layer
-    # (Cloudflare Turnstile) tends to block exactly that kind of repeated live
-    # scraping from datacenter IPs, returning 403. "x-cache-tolerance" is the
-    # middle ground: it accepts any cached copy younger than N seconds, so most
-    # runs get fresh-enough data without forcing a fresh scrape (and a fresh shot
-    # at getting blocked) every single time.
+    # NOTE: r.jina.ai caches page renders for up to 3600s (1 hour) by default.
+    # Since a 45-60 min delivery delay is acceptable, we deliberately do NOT set
+    # x-no-cache or x-cache-tolerance here — letting Jina serve its own cached
+    # copy whenever it has one. This matters because a cached copy is served
+    # WITHOUT re-scraping x.com, so it can't trigger X's anti-bot block. Forcing
+    # freshness on every run was exactly what caused the 403s, since every run
+    # then had to survive X's live bot-detection instead of just reading a cache.
     jina_url = f"https://r.jina.ai/https://x.com/{TWITTER_TARGET_USER}"
-    jina_attempts = [
-        {"x-cache-tolerance": "300"},                                  # normal: allow up to 5 min old
-        {"x-cache-tolerance": "300", "x-engine": "browser"},           # retry: force full browser render
-    ]
-    for attempt_num, extra_headers in enumerate(jina_attempts, start=1):
-        try:
-            print(f"📡 Method 1 (attempt {attempt_num}): Fetching via Jina AI Reader ({jina_url})...")
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                **extra_headers,
-            }
-            resp = requests.get(jina_url, headers=headers, timeout=25)
-            print(f"Jina AI Status: {resp.status_code}")
-            if resp.status_code == 200:
-                found = re.findall(r'status/(\d+)', resp.text)
-                for tid in found:
-                    if tid not in tweet_ids:
-                        tweet_ids.append(tid)
-                if tweet_ids:
-                    print(f"✅ Success via Jina AI Reader! Found {len(tweet_ids)} Tweet IDs.")
-                    return tweet_ids
-            elif resp.status_code == 403:
-                print("Jina AI Reader was blocked (403) - likely X's anti-bot layer. Retrying...")
-                time.sleep(3)
-        except Exception as e:
-            print(f"Jina AI Reader notice: {e}")
+    try:
+        print(f"📡 Method 1: Fetching via Jina AI Reader ({jina_url})...")
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(jina_url, headers=headers, timeout=25)
+        print(f"Jina AI Status: {resp.status_code}")
+        if resp.status_code == 200:
+            found = re.findall(r'status/(\d+)', resp.text)
+            for tid in found:
+                if tid not in tweet_ids:
+                    tweet_ids.append(tid)
+            if tweet_ids:
+                print(f"✅ Success via Jina AI Reader! Found {len(tweet_ids)} Tweet IDs.")
+                return tweet_ids
+        elif resp.status_code == 403:
+            print("Jina AI Reader was blocked (403) - even the cached copy was unavailable. Falling back...")
+    except Exception as e:
+        print(f"Jina AI Reader notice: {e}")
 
     # Method 2: Twitter's embed-widget syndication endpoints, called directly.
     # NOTE: CORS proxies (allorigins/corsproxy.io) exist to work around a BROWSER
@@ -108,15 +97,18 @@ def fetch_recent_tweet_ids():
     # that "looks like" a widget: a normal browser User-Agent plus a Referer of
     # platform.twitter.com. We try both the current CDN host and the legacy host,
     # since either may be the one still serving traffic in a given window.
-    cache_buster = int(time.time())
+    # No cache-busting param here on purpose: since some delay is acceptable,
+    # letting any caching layer in front of these endpoints serve the request
+    # is strictly better than forcing a fresh hit (and a fresh shot at a block)
+    # every single run.
     widget_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         "Referer": "https://platform.twitter.com/",
         "Accept": "application/json",
     }
     syndication_urls = [
-        f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true&_={cache_buster}",
-        f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}?_={cache_buster}",
+        f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true",
+        f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}",
     ]
     for s_url in syndication_urls:
         try:
