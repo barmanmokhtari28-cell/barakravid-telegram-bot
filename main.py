@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+from curl_cffi import requests as cf_requests
 from deep_translator import GoogleTranslator
 
 # --- Environment Variables ---
@@ -124,6 +125,12 @@ def fetch_recent_tweet_ids():
     # letting any caching layer in front of these endpoints serve the request
     # is strictly better than forcing a fresh hit (and a fresh shot at a block)
     # every single run.
+    # We use curl_cffi (not plain requests) here specifically: a 200 status with
+    # an EMPTY body is a classic sign of TLS-fingerprint-based bot detection —
+    # Cloudflare-class defenses inspect the TLS handshake itself (cipher order,
+    # extensions, etc), which plain Python `requests` can't disguise no matter
+    # what headers you set. curl_cffi replicates a real Chrome TLS handshake at
+    # that lower layer, which header spoofing alone cannot do.
     widget_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         "Referer": "https://platform.twitter.com/",
@@ -136,7 +143,7 @@ def fetch_recent_tweet_ids():
     for s_url in syndication_urls:
         try:
             print(f"📡 Method 2: Trying syndication endpoint ({s_url[:60]}...)...")
-            resp = requests.get(s_url, headers=widget_headers, timeout=12)
+            resp = cf_requests.get(s_url, headers=widget_headers, impersonate="chrome124", timeout=12)
             if resp.status_code == 200:
                 found = extract_tweet_ids(resp.text)
                 for tid in found:
@@ -145,6 +152,8 @@ def fetch_recent_tweet_ids():
                 if tweet_ids:
                     print(f"✅ Success via syndication endpoint! Found {len(tweet_ids)} Tweet IDs.")
                     return tweet_ids
+                elif not resp.text.strip():
+                    print("Syndication endpoint returned 200 with an EMPTY body — this usually means a soft block is still in place, not that the account has no tweets.")
                 else:
                     print("Syndication endpoint returned 200 but no tweet IDs were found in the content.")
                     print(f"Raw response snippet for debugging: {resp.text[:300]!r}")
