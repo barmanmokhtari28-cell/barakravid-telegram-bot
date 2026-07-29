@@ -1,0 +1,43 @@
+name: Check Tweets
+
+on:
+  schedule:
+    # Runs every 15 minutes, offset from :00/:15/:30/:45.
+    # GitHub queues scheduled runs globally and the top of every hour (and each
+    # quarter-hour) is the busiest slot, where delays of 10-60+ minutes are common.
+    # Running at :03/:18/:33/:48 instead avoids that peak-load queue.
+    - cron: '3,18,33,48 * * * *'
+  workflow_dispatch:        # Manual run button
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.4.0
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Bot Script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
+          TWITTER_TARGET_USER: ${{ secrets.TWITTER_TARGET_USER }}
+        run: python main.py
+
+      - name: Save Last Checked Tweet ID
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_tweet_id.txt || true
+          git commit -m "Update last checked tweet ID" || exit 0
+          git push
