@@ -1,2 +1,0 @@
-# barakravid-telegram-bot
-Barakina
