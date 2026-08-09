@@ -43,12 +43,21 @@ def translate_if_needed(text: str, tweet_lang: str = None) -> tuple[str, bool]:
         return text, False
 
 def extract_tweet_ids(text: str) -> list[str]:
-    """Pulls tweet IDs out of HTML, RSS XML, or JSON response bodies."""
+    """Pulls tweet IDs out of an HTML or JSON response body.
+
+    Handles three shapes we've seen in practice:
+    - plain HTML links: /status/1234567890
+    - JSON with escaped slashes: status\\/1234567890 (common with older/internal
+      Twitter backends, which escape "/" as "\\/" inside JSON strings)
+    - JSON fields with the ID as a plain value: "id_str":"1234567890"
+    A single regex tuned for HTML silently finds nothing against a JSON body,
+    which looks identical to "no tweets" — this checks all three so a 200
+    response isn't wasted just because of how the ID happened to be encoded.
+    """
     ids = []
     patterns = [
         r'status\\?/(\d+)',
         r'"id_str"\s*:\s*"(\d+)"',
-        r'statuses/(\d+)',
     ]
     for pattern in patterns:
         for tid in re.findall(pattern, text):
@@ -57,7 +66,7 @@ def extract_tweet_ids(text: str) -> list[str]:
     return ids
 
 def fetch_tweet_details_fxtwitter(tweet_id: str):
-    """Fetches full tweet metadata and media via FxTwitter / VxTwitter API."""
+    """Fetches full tweet metadata and media via FxTwitter API."""
     for domain in ["api.fxtwitter.com", "api.vxtwitter.com"]:
         url = f"https://{domain}/{TWITTER_TARGET_USER}/status/{tweet_id}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -72,73 +81,61 @@ def fetch_tweet_details_fxtwitter(tweet_id: str):
     return None
 
 def fetch_recent_tweet_ids():
-    """Multi-tiered fetch strategy to overcome Twitter / GitHub Actions IP blocks."""
+    """Fetches recent Tweet IDs via Jina AI Reader, falling back to Twitter's embed-widget syndication endpoints."""
     tweet_ids = []
-
-    # --------------------------------------------------------------------------
-    # Method 1: Nitter Public RSS Feeds
-    # --------------------------------------------------------------------------
-    # Nitter instances bypass Twitter's web bot-detection and deliver standard RSS feeds.
-    nitter_instances = [
-        f"https://nitter.poast.org/{TWITTER_TARGET_USER}/rss",
-        f"https://nitter.privacydev.net/{TWITTER_TARGET_USER}/rss",
-        f"https://nitter.lucabased.xyz/{TWITTER_TARGET_USER}/rss",
-        f"https://nitter.spaceint.fr/{TWITTER_TARGET_USER}/rss",
-        f"https://nitter.x86-64-gmbh.sc/{TWITTER_TARGET_USER}/rss",
-    ]
-    print("📡 Method 1: Fetching via Nitter RSS feeds...")
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    for nitter_url in nitter_instances:
-        try:
-            resp = requests.get(nitter_url, headers=headers, timeout=8)
-            if resp.status_code == 200 and resp.text.strip():
-                found = extract_tweet_ids(resp.text)
-                if found:
-                    print(f"✅ Success via Nitter ({nitter_url.split('/')[2]})! Found {len(found)} Tweet IDs.")
-                    return found
-        except Exception:
-            continue
-
-    # --------------------------------------------------------------------------
-    # Method 2: Twitter Syndication via Public Proxy Relays
-    # --------------------------------------------------------------------------
-    # Twitter returns empty bodies (200) or 429 errors directly to GitHub Actions IP ranges.
-    # Routing the syndication request through a public proxy bridge routes it from a non-datacenter IP.
-    target_syndication = f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true"
-    proxy_urls = [
-        f"https://api.allorigins.win/raw?url={target_syndication}",
-        f"https://corsproxy.io/?{target_syndication}",
-    ]
-    print("📡 Method 2: Fetching Syndication via Proxy Bridges...")
-    for p_url in proxy_urls:
-        try:
-            resp = requests.get(p_url, headers=headers, timeout=10)
-            if resp.status_code == 200 and resp.text.strip():
-                found = extract_tweet_ids(resp.text)
-                if found:
-                    print(f"✅ Success via Proxy Bridge ({p_url.split('/')[2]})! Found {len(found)} Tweet IDs.")
-                    return found
-        except Exception:
-            continue
-
-    # --------------------------------------------------------------------------
-    # Method 3: Jina AI Web Reader
-    # --------------------------------------------------------------------------
+    
+    # Method 1: Jina AI Web Reader (Renders X.com using headless browser proxies)
+    # NOTE: r.jina.ai caches page renders for up to 3600s (1 hour) by default.
+    # Since a 45-60 min delivery delay is acceptable, we deliberately do NOT set
+    # x-no-cache or x-cache-tolerance here — letting Jina serve its own cached
+    # copy whenever it has one. This matters because a cached copy is served
+    # WITHOUT re-scraping x.com, so it can't trigger X's anti-bot block. Forcing
+    # freshness on every run was exactly what caused the 403s, since every run
+    # then had to survive X's live bot-detection instead of just reading a cache.
     jina_url = f"https://r.jina.ai/https://x.com/{TWITTER_TARGET_USER}"
     try:
-        print(f"📡 Method 3: Fetching via Jina AI Reader ({jina_url})...")
+        print(f"📡 Method 1: Fetching via Jina AI Reader ({jina_url})...", flush=True)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         resp = requests.get(jina_url, headers=headers, timeout=25)
+        print(f"Jina AI Status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
         if resp.status_code == 200:
             found = extract_tweet_ids(resp.text)
-            if found:
-                print(f"✅ Success via Jina AI Reader! Found {len(found)} Tweet IDs.")
-                return found
+            for tid in found:
+                if tid not in tweet_ids:
+                    tweet_ids.append(tid)
+            if tweet_ids:
+                print(f"✅ Success via Jina AI Reader! Found {len(tweet_ids)} Tweet IDs.", flush=True)
+                return tweet_ids
+            else:
+                print(f"Jina AI Reader returned 200 but no Tweet IDs were parsed out of the body.", flush=True)
+                print(f"Raw response snippet for debugging: {resp.text[:300]!r}", flush=True)
+        elif resp.status_code == 403:
+            print("Jina AI Reader was blocked (403) - even the cached copy was unavailable. Falling back...", flush=True)
+        else:
+            print(f"Jina AI Reader returned an unexpected status. Body snippet: {resp.text[:300]!r}", flush=True)
     except Exception as e:
-        print(f"Jina AI Reader notice: {e}")
+        print(f"Jina AI Reader notice: {e}", flush=True)
 
-    # --------------------------------------------------------------------------
-    # Method 4: Direct Twitter Syndication with TLS Spoofing (curl_cffi)
-    # --------------------------------------------------------------------------
+    # Method 2: Twitter's embed-widget syndication endpoints, called directly.
+    # NOTE: CORS proxies (allorigins/corsproxy.io) exist to work around a BROWSER
+    # restriction — they're irrelevant here since this is a server-side Python
+    # script, not JS running in a browser. Routing through them was adding two
+    # more unreliable free services on top of Twitter's own blocking, for no
+    # benefit. These endpoints are what Twitter's own embed widgets (the ones
+    # websites use to show a live timeline) call, so they respond to a request
+    # that "looks like" a widget: a normal browser User-Agent plus a Referer of
+    # platform.twitter.com. We try both the current CDN host and the legacy host,
+    # since either may be the one still serving traffic in a given window.
+    # No cache-busting param here on purpose: since some delay is acceptable,
+    # letting any caching layer in front of these endpoints serve the request
+    # is strictly better than forcing a fresh hit (and a fresh shot at a block)
+    # every single run.
+    # We use curl_cffi (not plain requests) here specifically: a 200 status with
+    # an EMPTY body is a classic sign of TLS-fingerprint-based bot detection —
+    # Cloudflare-class defenses inspect the TLS handshake itself (cipher order,
+    # extensions, etc), which plain Python `requests` can't disguise no matter
+    # what headers you set. curl_cffi replicates a real Chrome TLS handshake at
+    # that lower layer, which header spoofing alone cannot do.
     widget_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         "Referer": "https://platform.twitter.com/",
@@ -148,17 +145,28 @@ def fetch_recent_tweet_ids():
         f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true",
         f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{TWITTER_TARGET_USER}",
     ]
-    print("📡 Method 4: Trying Direct Twitter Syndication Endpoints...")
     for s_url in syndication_urls:
         try:
+            print(f"📡 Method 2: Trying syndication endpoint ({s_url[:60]}...)...", flush=True)
             resp = cf_requests.get(s_url, headers=widget_headers, impersonate="chrome124", timeout=12)
-            if resp.status_code == 200 and resp.text.strip():
+            print(f"Syndication status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
+            if resp.status_code == 200:
                 found = extract_tweet_ids(resp.text)
-                if found:
-                    print(f"✅ Success via direct syndication! Found {len(found)} Tweet IDs.")
-                    return found
+                for tid in found:
+                    if tid not in tweet_ids:
+                        tweet_ids.append(tid)
+                if tweet_ids:
+                    print(f"✅ Success via syndication endpoint! Found {len(tweet_ids)} Tweet IDs.", flush=True)
+                    return tweet_ids
+                elif not resp.text.strip():
+                    print("Syndication endpoint returned 200 with an EMPTY body — this usually means a soft block is still in place, not that the account has no tweets.", flush=True)
+                else:
+                    print("Syndication endpoint returned 200 but no tweet IDs were found in the content.", flush=True)
+                    print(f"Raw response snippet for debugging: {resp.text[:300]!r}", flush=True)
+            else:
+                print(f"Syndication notice: got HTTP {resp.status_code}. Body snippet: {resp.text[:300]!r}", flush=True)
         except Exception as e:
-            print(f"Direct syndication notice: {e}")
+            print(f"Syndication notice: {e}", flush=True)
 
     return tweet_ids
 
