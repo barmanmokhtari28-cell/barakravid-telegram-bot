@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+from urllib.parse import quote
 from curl_cffi import requests as cf_requests
 from deep_translator import GoogleTranslator
 
@@ -8,6 +9,7 @@ from deep_translator import GoogleTranslator
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@secretollah")
 TWITTER_TARGET_USER = os.getenv("TWITTER_TARGET_USER", "barakravid")
+SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")
 
 STATE_FILE = "last_tweet_id.txt"
 
@@ -81,7 +83,10 @@ def fetch_tweet_details_fxtwitter(tweet_id: str):
     return None
 
 def fetch_recent_tweet_ids():
-    """Fetches recent Tweet IDs via Jina AI Reader, falling back to Twitter's embed-widget syndication endpoints."""
+    """Fetches recent Tweet IDs via Jina AI Reader, falling back to Twitter's embed-widget
+    syndication endpoints called directly, then falling back again to the same syndication
+    endpoint routed through ScraperAPI (a paid proxy pool) when the direct GitHub Actions IP
+    is blocked or rate-limited."""
     tweet_ids = []
     
     # Method 1: Jina AI Web Reader (Renders X.com using headless browser proxies)
@@ -167,6 +172,40 @@ def fetch_recent_tweet_ids():
                 print(f"Syndication notice: got HTTP {resp.status_code}. Body snippet: {resp.text[:300]!r}", flush=True)
         except Exception as e:
             print(f"Syndication notice: {e}", flush=True)
+
+    # Method 3: Same syndication endpoint, routed through ScraperAPI so the
+    # request comes from ScraperAPI's proxy pool instead of GitHub Actions'
+    # shared (and evidently blocked/rate-limited) IP range. This targets the
+    # raw JSON endpoint directly (no JS rendering flag) since the endpoint
+    # already returns JSON on its own - that keeps each call to a single
+    # credit on ScraperAPI's free tier instead of the much pricier
+    # JS-rendering multiplier.
+    if not SCRAPERAPI_KEY:
+        print("Method 3 skipped: SCRAPERAPI_KEY is not set.", flush=True)
+    else:
+        target_url = f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true"
+        proxy_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={quote(target_url, safe='')}"
+        try:
+            print("📡 Method 3: Trying syndication endpoint via ScraperAPI...", flush=True)
+            resp = requests.get(proxy_url, timeout=60)
+            print(f"ScraperAPI status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
+            if resp.status_code == 200:
+                found = extract_tweet_ids(resp.text)
+                for tid in found:
+                    if tid not in tweet_ids:
+                        tweet_ids.append(tid)
+                if tweet_ids:
+                    print(f"✅ Success via ScraperAPI! Found {len(tweet_ids)} Tweet IDs.", flush=True)
+                    return tweet_ids
+                else:
+                    print("ScraperAPI returned 200 but no Tweet IDs were found in the content.", flush=True)
+                    print(f"Raw response snippet for debugging: {resp.text[:300]!r}", flush=True)
+            elif resp.status_code in (403, 429):
+                print(f"ScraperAPI notice: got HTTP {resp.status_code}. This usually means the ScraperAPI free-tier credit limit was hit for the month, or its own proxy got blocked. Body: {resp.text[:300]!r}", flush=True)
+            else:
+                print(f"ScraperAPI notice: got HTTP {resp.status_code}. Body snippet: {resp.text[:300]!r}", flush=True)
+        except Exception as e:
+            print(f"ScraperAPI notice: {e}", flush=True)
 
     return tweet_ids
 
