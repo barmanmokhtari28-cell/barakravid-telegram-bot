@@ -84,9 +84,9 @@ def fetch_tweet_details_fxtwitter(tweet_id: str):
 
 def fetch_recent_tweet_ids():
     """Fetches recent Tweet IDs via Jina AI Reader, falling back to Twitter's embed-widget
-    syndication endpoints called directly, then falling back again to the same syndication
-    endpoint routed through ScraperAPI (a paid proxy pool) when the direct GitHub Actions IP
-    is blocked or rate-limited."""
+    syndication endpoints called directly, then a free public Nitter mirror (xcancel.com),
+    then finally the same syndication endpoint routed through ScraperAPI (a paid proxy pool)
+    when everything free has failed."""
     tweet_ids = []
     
     # Method 1: Jina AI Web Reader (Renders X.com using headless browser proxies)
@@ -173,20 +173,54 @@ def fetch_recent_tweet_ids():
         except Exception as e:
             print(f"Syndication notice: {e}", flush=True)
 
-    # Method 3: Same syndication endpoint, routed through ScraperAPI so the
+    # Method 3: xcancel.com, currently the most actively-maintained public
+    # Nitter mirror (per its own maintainers, ~99.99% uptime as of early
+    # 2026) - it runs its own pool of logged-in X accounts server-side, so
+    # it isn't hitting the same GitHub Actions IP block we are. Its RSS feed
+    # (/user/rss) needs a real browser fingerprint to get past its own bot
+    # check, hence curl_cffi's Chrome impersonation rather than plain
+    # requests. This is free, so it's tried before the paid ScraperAPI
+    # fallback. Nitter mirrors are historically fragile - if xcancel.com
+    # itself goes down, add another surviving mirror's domain to this list.
+    nitter_mirrors = ["https://xcancel.com"]
+    for mirror in nitter_mirrors:
+        rss_url = f"{mirror}/{TWITTER_TARGET_USER}/rss"
+        try:
+            print(f"📡 Method 3: Trying Nitter mirror RSS ({rss_url})...", flush=True)
+            resp = cf_requests.get(rss_url, headers=widget_headers, impersonate="chrome124", timeout=15)
+            print(f"{mirror} status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
+            if resp.status_code == 200:
+                found = extract_tweet_ids(resp.text)
+                for tid in found:
+                    if tid not in tweet_ids:
+                        tweet_ids.append(tid)
+                if tweet_ids:
+                    print(f"✅ Success via {mirror}! Found {len(tweet_ids)} Tweet IDs.", flush=True)
+                    return tweet_ids
+                else:
+                    print(f"{mirror} returned 200 but no Tweet IDs were found - may be down/serving an error page despite the 200.", flush=True)
+                    print(f"Raw response snippet for debugging: {resp.text[:300]!r}", flush=True)
+            else:
+                print(f"{mirror} notice: got HTTP {resp.status_code}. Body snippet: {resp.text[:300]!r}", flush=True)
+        except Exception as e:
+            print(f"{mirror} notice: {e}", flush=True)
+
+    # Method 4: Same syndication endpoint, routed through ScraperAPI so the
     # request comes from ScraperAPI's proxy pool instead of GitHub Actions'
     # shared (and evidently blocked/rate-limited) IP range. ScraperAPI flags
     # this domain as protected, so premium=true (residential/mobile proxies)
     # is required - that costs 10 credits/request instead of 1. Budgeted
     # against the free tier's 1,000 credits/month via the widened cron
     # interval in check_tweets.yml (~90 requests/month at 10 credits = 900).
+    # This only runs when the free methods above (including the Nitter
+    # mirror) have already failed, so it should rarely be reached at all.
     if not SCRAPERAPI_KEY:
-        print("Method 3 skipped: SCRAPERAPI_KEY is not set.", flush=True)
+        print("Method 4 skipped: SCRAPERAPI_KEY is not set.", flush=True)
     else:
         target_url = f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true"
         proxy_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={quote(target_url, safe='')}&premium=true"
         try:
-            print("📡 Method 3: Trying syndication endpoint via ScraperAPI...", flush=True)
+            print("📡 Method 4: Trying syndication endpoint via ScraperAPI...", flush=True)
             resp = requests.get(proxy_url, timeout=60)
             print(f"ScraperAPI status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
             if resp.status_code == 200:
