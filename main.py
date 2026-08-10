@@ -176,18 +176,25 @@ def fetch_recent_tweet_ids():
     # Method 3: xcancel.com, currently the most actively-maintained public
     # Nitter mirror (per its own maintainers, ~99.99% uptime as of early
     # 2026) - it runs its own pool of logged-in X accounts server-side, so
-    # it isn't hitting the same GitHub Actions IP block we are. Its RSS feed
-    # (/user/rss) needs a real browser fingerprint to get past its own bot
-    # check, hence curl_cffi's Chrome impersonation rather than plain
-    # requests. This is free, so it's tried before the paid ScraperAPI
-    # fallback. Nitter mirrors are historically fragile - if xcancel.com
-    # itself goes down, add another surviving mirror's domain to this list.
+    # it isn't hitting the same GitHub Actions IP block we are. This is
+    # free, so it's tried before the paid ScraperAPI fallback. Nitter
+    # mirrors are historically fragile - if xcancel.com itself goes down,
+    # add another surviving mirror's domain to this list.
+    # Its /rss route specifically checks the Accept header to confirm the
+    # request looks like a real feed reader (an RSS Accept header, not a
+    # browser/JSON one) - reusing widget_headers (Accept: application/json,
+    # a Twitter Referer) got a 400 "This URL only works inside an RSS
+    # client." even though the site itself was reachable.
+    rss_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+    }
     nitter_mirrors = ["https://xcancel.com"]
     for mirror in nitter_mirrors:
         rss_url = f"{mirror}/{TWITTER_TARGET_USER}/rss"
         try:
             print(f"📡 Method 3: Trying Nitter mirror RSS ({rss_url})...", flush=True)
-            resp = cf_requests.get(rss_url, headers=widget_headers, impersonate="chrome124", timeout=15)
+            resp = cf_requests.get(rss_url, headers=rss_headers, impersonate="chrome124", timeout=15)
             print(f"{mirror} status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
             if resp.status_code == 200:
                 found = extract_tweet_ids(resp.text)
