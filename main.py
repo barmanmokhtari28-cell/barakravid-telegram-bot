@@ -180,21 +180,23 @@ def fetch_recent_tweet_ids():
     # free, so it's tried before the paid ScraperAPI fallback. Nitter
     # mirrors are historically fragile - if xcancel.com itself goes down,
     # add another surviving mirror's domain to this list.
-    # Its /rss route specifically checks the Accept header to confirm the
-    # request looks like a real feed reader (an RSS Accept header, not a
-    # browser/JSON one) - reusing widget_headers (Accept: application/json,
-    # a Twitter Referer) got a 400 "This URL only works inside an RSS
-    # client." even though the site itself was reachable.
+    # Its /rss route rejects anything that looks like a browser (curl_cffi's
+    # Chrome impersonation still got a 400 "This URL only works inside an
+    # RSS client." even with an RSS-flavored Accept header) - it appears to
+    # specifically want a non-browser feed-reader identity, so this drops
+    # the Chrome impersonation and Accept-header approach entirely in favor
+    # of a plain requests call identifying as a feed reader. Undocumented
+    # behavior on an unofficial mirror, so this may still need adjusting.
     rss_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+        "User-Agent": "Miniflux/2.0.51",
+        "Accept": "application/rss+xml, application/xml, text/xml",
     }
     nitter_mirrors = ["https://xcancel.com"]
     for mirror in nitter_mirrors:
         rss_url = f"{mirror}/{TWITTER_TARGET_USER}/rss"
         try:
             print(f"📡 Method 3: Trying Nitter mirror RSS ({rss_url})...", flush=True)
-            resp = cf_requests.get(rss_url, headers=rss_headers, impersonate="chrome124", timeout=15)
+            resp = requests.get(rss_url, headers=rss_headers, timeout=15)
             print(f"{mirror} status: {resp.status_code} | body length: {len(resp.text)}", flush=True)
             if resp.status_code == 200:
                 found = extract_tweet_ids(resp.text)
