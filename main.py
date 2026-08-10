@@ -175,16 +175,16 @@ def fetch_recent_tweet_ids():
 
     # Method 3: Same syndication endpoint, routed through ScraperAPI so the
     # request comes from ScraperAPI's proxy pool instead of GitHub Actions'
-    # shared (and evidently blocked/rate-limited) IP range. This targets the
-    # raw JSON endpoint directly (no JS rendering flag) since the endpoint
-    # already returns JSON on its own - that keeps each call to a single
-    # credit on ScraperAPI's free tier instead of the much pricier
-    # JS-rendering multiplier.
+    # shared (and evidently blocked/rate-limited) IP range. ScraperAPI flags
+    # this domain as protected, so premium=true (residential/mobile proxies)
+    # is required - that costs 10 credits/request instead of 1. Budgeted
+    # against the free tier's 1,000 credits/month via the widened cron
+    # interval in check_tweets.yml (~90 requests/month at 10 credits = 900).
     if not SCRAPERAPI_KEY:
         print("Method 3 skipped: SCRAPERAPI_KEY is not set.", flush=True)
     else:
         target_url = f"https://cdn.syndication.twimg.com/timeline/profile?screen_name={TWITTER_TARGET_USER}&dnt=true"
-        proxy_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={quote(target_url, safe='')}"
+        proxy_url = f"http://api.scraperapi.com/?api_key={SCRAPERAPI_KEY}&url={quote(target_url, safe='')}&premium=true"
         try:
             print("📡 Method 3: Trying syndication endpoint via ScraperAPI...", flush=True)
             resp = requests.get(proxy_url, timeout=60)
