@@ -2,12 +2,15 @@ name: Check Tweets
 
 on:
   schedule:
-    # Runs every 30 minutes, offset from :00/:30.
-    # GitHub queues scheduled runs globally and the top/half of every hour is the
-    # busiest slot, where delays of 10-60+ minutes are common — :07/:37 avoids it.
-    # A wider 30-min interval also means fewer requests against X overall, which
-    # lowers the chance of tripping its anti-bot rate limiting.
-    - cron: '7,37 * * * *'
+    # Runs 3x/day (every 8 hours), offset from :00 to dodge GitHub's busiest
+    # scheduling slot at the top of the hour.
+    # Widened from every 30 min specifically to fit ScraperAPI's free-tier
+    # budget: Method 3 (premium=true proxy fallback) costs 10 credits/request
+    # against a 1,000/month cap. At 3 runs/day this is ~90 requests/month
+    # (~900 credits) even if every run needs the fallback, leaving a small
+    # buffer. Posts to Telegram may lag up to ~8 hours behind the tweet as a
+    # result - widen further or upgrade the ScraperAPI plan to tighten this.
+    - cron: '7 */8 * * *'
   workflow_dispatch:        # Manual run button
 
 jobs:
